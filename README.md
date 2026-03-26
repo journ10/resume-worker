@@ -67,14 +67,16 @@ npx wrangler kv namespace create "RESUME_KV"
 
 | Secret 名称 | 说明 |
 |---|---|
-| `CLOUDFLARE_API_TOKEN` | Cloudflare API Token���需要 Workers 编辑权限） |
+| `CLOUDFLARE_API_TOKEN` | Cloudflare API Token（需要 Workers 编辑权限） |
 | `CLOUDFLARE_ACCOUNT_ID` | 你的 Cloudflare Account ID |
 | `KV_NAMESPACE_ID` | 第二步创建的 KV 命名空间 ID |
 | `ADMIN_KEY` | 管理密钥，自行设置一个强密码，例如 `sk_myKey2026!` |
 | `ALLOWED_ORIGIN` | 你的前端域名，例如 `https://yourusername.github.io` |
 
+> ⚠️ `ALLOWED_ORIGIN` 只需填写 `https://yourusername.github.io`（不含路径），因为浏览器发送的 Origin 头只包含协议+域名。
+
 > 获取 Cloudflare API Token：[Cloudflare Dashboard](https://dash.cloudflare.com/profile/api-tokens) → Create Token → 选择 "Edit Cloudflare Workers" 模板
-> 
+>
 > 获取 Account ID：Cloudflare Dashboard 右侧边栏即可看到
 
 ### 第四步：触发部署
@@ -91,13 +93,15 @@ https://resume-worker.<your-subdomain>.workers.dev
 
 ## 搭配前端使用
 
-本 Worker 设计与 [journ10/journ10.github.io](https://github.com/journ10/journ10.github.io) 前端配合使用。
+本 Worker 设计与 [journ10/resume](https://github.com/journ10/resume) 前端配合使用。
 
 Fork 前端仓库后，需要在前端仓库的 GitHub Secrets 中添加：
 
 | Secret 名称 | 说明 |
 |---|---|
 | `WORKER_URL` | 你的 Worker 地址，例如 `https://resume-worker.xxx.workers.dev` |
+
+部署完成后，前端访问地址为：`https://yourusername.github.io/resume/`
 
 ---
 
