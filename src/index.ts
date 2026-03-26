@@ -408,6 +408,121 @@ async function handleCleanup(
 }
 
 // ---------------------------------------------------------------------------
+// Contact message handlers
+// ---------------------------------------------------------------------------
+
+interface ContactMessage {
+  id: string;
+  name: string;
+  email: string;
+  subject: string;
+  message: string;
+  ip: string;
+  createdAt: number;
+}
+
+/** POST /api/contact — submit a contact message (public, rate-limited by IP) */
+async function handleContact(
+  request: Request,
+  env: Env,
+  origin: string | null
+): Promise<Response> {
+  const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
+  const rlKey = `rl_contact_${ip}`;
+
+  const limited = await enforceRateLimit(env, rlKey, origin);
+  if (limited) return limited;
+
+  // Count every submission toward the rate limit to prevent spam
+  await recordFailedAttempt(env, rlKey);
+
+  let body: { name?: string; email?: string; subject?: string; message?: string } = {};
+  try {
+    body = (await request.json()) as typeof body;
+  } catch {
+    return jsonResponse({ error: "Invalid JSON body" }, 400, origin, env);
+  }
+
+  const { name, email, message } = body;
+  if (!name || !email || !message) {
+    return jsonResponse({ error: "Missing required fields: name, email, message" }, 400, origin, env);
+  }
+
+  const id = randomAlphanumeric(12);
+  const entry: ContactMessage = {
+    id,
+    name,
+    email,
+    subject: body.subject ?? "",
+    message,
+    ip,
+    createdAt: Date.now(),
+  };
+
+  await env.RESUME_KV.put(`msg_${id}`, JSON.stringify(entry));
+  return jsonResponse({ ok: true }, 200, origin, env);
+}
+
+/** GET /api/messages — list all contact messages (admin only) */
+async function handleListMessages(
+  request: Request,
+  env: Env,
+  origin: string | null
+): Promise<Response> {
+  const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
+  const rlKey = `rl_admin_${ip}`;
+
+  const limited = await enforceRateLimit(env, rlKey, origin);
+  if (limited) return limited;
+
+  if (!isAuthorized(request, env)) {
+    await recordFailedAttempt(env, rlKey);
+    return jsonResponse({ error: "Unauthorized" }, 401, origin, env);
+  }
+  await resetFailedAttempts(env, rlKey);
+
+  const list = await env.RESUME_KV.list({ prefix: "msg_" });
+  const results = await Promise.all(
+    list.keys.map(async (key) => {
+      const raw = await env.RESUME_KV.get(key.name);
+      if (!raw) return null;
+      return JSON.parse(raw) as ContactMessage;
+    })
+  );
+  const messages = results.filter(Boolean) as ContactMessage[];
+  messages.sort((a, b) => b.createdAt - a.createdAt);
+  return jsonResponse(messages, 200, origin, env);
+}
+
+/** DELETE /api/messages/:id — delete a contact message (admin only) */
+async function handleDeleteMessage(
+  id: string,
+  request: Request,
+  env: Env,
+  origin: string | null
+): Promise<Response> {
+  const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
+  const rlKey = `rl_admin_${ip}`;
+
+  const limited = await enforceRateLimit(env, rlKey, origin);
+  if (limited) return limited;
+
+  if (!isAuthorized(request, env)) {
+    await recordFailedAttempt(env, rlKey);
+    return jsonResponse({ error: "Unauthorized" }, 401, origin, env);
+  }
+  await resetFailedAttempts(env, rlKey);
+
+  const key = `msg_${id}`;
+  const raw = await env.RESUME_KV.get(key);
+  if (!raw) {
+    return jsonResponse({ error: "Message not found" }, 404, origin, env);
+  }
+  await env.RESUME_KV.delete(key);
+  return jsonResponse({ ok: true, id }, 200, origin, env);
+}
+
+// ---------------------------------------------------------------------------
 // Admin HTML page
 // ---------------------------------------------------------------------------
 
@@ -500,6 +615,14 @@ function getAdminHTML(): string {
   .toast { background: #2a2d3a; color: var(--text); border-radius: 8px; padding: 12px 18px; font-size: .9rem; box-shadow: 0 4px 20px rgba(0,0,0,.4); animation: toast-in .2s ease; text-align: center; width: 100%; }
   @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 
+  /* ---- Message list ---- */
+  .msg-item { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 14px; margin-bottom: 10px; }
+  .msg-item-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+  .msg-sender { font-weight: 600; font-size: .95rem; }
+  .msg-subject { font-size: .88rem; color: var(--muted); margin-bottom: 8px; }
+  .msg-body { font-size: .9rem; white-space: pre-wrap; word-break: break-word; line-height: 1.6; margin-bottom: 10px; }
+  .msg-meta { font-size: .8rem; color: var(--muted); }
+
   /* ---- Misc ---- */
   .row { display: flex; gap: 10px; flex-wrap: wrap; }
   .row .btn { flex: 1; }
@@ -534,6 +657,7 @@ function getAdminHTML(): string {
   <div class="tabs">
     <button class="tab-btn active" data-tab="data">简历数据</button>
     <button class="tab-btn" data-tab="passwords">密码管理</button>
+    <button class="tab-btn" data-tab="messages">📬 消息</button>
   </div>
 
   <!-- Tab: Resume Data -->
@@ -586,6 +710,17 @@ function getAdminHTML(): string {
         </div>
       </div>
       <div id="pwd-list"><div class="empty">加载中…</div></div>
+    </div>
+  </div>
+
+  <!-- Tab: Messages -->
+  <div class="tab-panel" id="tab-messages">
+    <div class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+        <div class="card-title" style="margin-bottom:0">联系消息</div>
+        <button class="btn btn-ghost btn-sm" id="refresh-msg-btn">🔄 刷新</button>
+      </div>
+      <div id="msg-list"><div class="empty">加载中…</div></div>
     </div>
   </div>
 </div>
@@ -681,6 +816,7 @@ function getAdminHTML(): string {
       btn.classList.add('active');
       document.getElementById('tab-' + tab).classList.add('active');
       if (tab === 'passwords') loadPasswordList();
+      if (tab === 'messages') loadMessageList();
     });
   });
 
@@ -826,6 +962,52 @@ function getAdminHTML(): string {
   function escHtml(str) {
     return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
   }
+
+  // ---- Messages Tab ----
+  function loadMessageList() {
+    var el = document.getElementById('msg-list');
+    el.innerHTML = '<div class="empty">加载中…</div>';
+    fetch(BASE + '/api/messages', { headers: authHeaders() })
+      .then(function (r) { return r.json(); })
+      .then(function (list) {
+        if (!Array.isArray(list)) { el.innerHTML = '<div class="empty">加载失败</div>'; return; }
+        if (list.length === 0) { el.innerHTML = '<div class="empty">暂无消息</div>'; return; }
+        el.innerHTML = list.map(function (m) {
+          return '<div class="msg-item">' +
+            '<div class="msg-item-header">' +
+              '<span class="msg-sender">' + escHtml(m.name) + ' &lt;<a href="mailto:' + encodeURIComponent(m.email) + '">' + escHtml(m.email) + '</a>&gt;</span>' +
+              '<button class="btn btn-danger btn-sm del-msg-btn" data-id="' + escHtml(m.id) + '">🗑 删除</button>' +
+            '</div>' +
+            (m.subject ? '<div class="msg-subject">主题：' + escHtml(m.subject) + '</div>' : '') +
+            '<div class="msg-body">' + escHtml(m.message) + '</div>' +
+            '<div class="msg-meta">' + fmtDate(m.createdAt) + '　<span>' + escHtml(m.ip) + '</span></div>' +
+          '</div>';
+        }).join('');
+      })
+      .catch(function () { el.innerHTML = '<div class="empty">加载失败</div>'; });
+  }
+
+  document.getElementById('msg-list').addEventListener('click', function (e) {
+    var target = e.target.closest('.del-msg-btn');
+    if (target) {
+      deleteMessage(target.dataset.id || '');
+    }
+  });
+
+  document.getElementById('refresh-msg-btn').addEventListener('click', loadMessageList);
+
+  function deleteMessage(id) {
+    if (!confirm('确定删除这条消息吗？')) return;
+    fetch(BASE + '/api/messages/' + encodeURIComponent(id), { method: 'DELETE', headers: authHeaders() })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (data.error) { showToast('❌ ' + data.error); return; }
+        showToast('✅ 已删除');
+        loadMessageList();
+      })
+      .catch(function () { showToast('❌ 请求失败'); });
+  }
+
 })();
 </script>
 </body>
@@ -876,6 +1058,19 @@ export default {
 
     if (pathname === "/api/verify" && request.method === "POST") {
       return handleVerify(request, env, origin);
+    }
+
+    if (pathname === "/api/contact" && request.method === "POST") {
+      return handleContact(request, env, origin);
+    }
+
+    if (pathname === "/api/messages") {
+      if (request.method === "GET") return handleListMessages(request, env, origin);
+    }
+
+    const msgMatch = pathname.match(/^\/api\/messages\/([^/]+)$/);
+    if (msgMatch && request.method === "DELETE") {
+      return handleDeleteMessage(msgMatch[1], request, env, origin);
     }
 
     return jsonResponse({ error: "Not found" }, 404, origin, env);
