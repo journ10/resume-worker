@@ -62,6 +62,58 @@ function randomAlphanumeric(length: number): string {
 }
 
 // ---------------------------------------------------------------------------
+// Security helpers
+// ---------------------------------------------------------------------------
+
+/** Compute a SHA-256 hex digest of the given string */
+async function sha256hex(str: string): Promise<string> {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
+  return Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+interface RateLimitData {
+  count: number;
+  firstAttempt: number;
+}
+
+const RATE_LIMIT_MAX = 5;
+const RATE_LIMIT_WINDOW = 900; // 15 minutes in seconds
+
+/** Returns a 429 response if the IP is rate-limited, otherwise null */
+async function enforceRateLimit(
+  env: Env,
+  key: string,
+  origin: string | null
+): Promise<Response | null> {
+  const raw = await env.RESUME_KV.get(key);
+  if (raw) {
+    const data: RateLimitData = JSON.parse(raw);
+    if (data.count >= RATE_LIMIT_MAX) {
+      return jsonResponse({ error: "请求过于频繁，请稍后再试" }, 429, origin);
+    }
+  }
+  return null;
+}
+
+/** Increment the failed-attempt counter for an IP */
+async function recordFailedAttempt(env: Env, key: string): Promise<void> {
+  const raw = await env.RESUME_KV.get(key);
+  let data: RateLimitData;
+  if (raw) {
+    data = JSON.parse(raw);
+    data.count++;
+  } else {
+    data = { count: 1, firstAttempt: Date.now() };
+  }
+  await env.RESUME_KV.put(key, JSON.stringify(data), { expirationTtl: RATE_LIMIT_WINDOW });
+}
+
+/** Reset the failed-attempt counter on successful auth */
+async function resetFailedAttempts(env: Env, key: string): Promise<void> {
+  await env.RESUME_KV.delete(key);
+}
+
+// ---------------------------------------------------------------------------
 // Route handlers
 // ---------------------------------------------------------------------------
 
@@ -71,9 +123,18 @@ async function handlePutData(
   env: Env,
   origin: string | null
 ): Promise<Response> {
+  const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
+  const rlKey = `rl_admin_${ip}`;
+
+  const limited = await enforceRateLimit(env, rlKey, origin);
+  if (limited) return limited;
+
   if (!isAuthorized(request, env)) {
+    await recordFailedAttempt(env, rlKey);
     return jsonResponse({ error: "Unauthorized" }, 401, origin);
   }
+  await resetFailedAttempts(env, rlKey);
+
   let body: unknown;
   try {
     body = await request.json();
@@ -90,9 +151,18 @@ async function handleGetData(
   env: Env,
   origin: string | null
 ): Promise<Response> {
+  const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
+  const rlKey = `rl_admin_${ip}`;
+
+  const limited = await enforceRateLimit(env, rlKey, origin);
+  if (limited) return limited;
+
   if (!isAuthorized(request, env)) {
+    await recordFailedAttempt(env, rlKey);
     return jsonResponse({ error: "Unauthorized" }, 401, origin);
   }
+  await resetFailedAttempts(env, rlKey);
+
   const raw = await env.RESUME_KV.get("resume_data");
   if (!raw) {
     return jsonResponse({ error: "No resume data found" }, 404, origin);
@@ -106,9 +176,18 @@ async function handleCreatePassword(
   env: Env,
   origin: string | null
 ): Promise<Response> {
+  const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
+  const rlKey = `rl_admin_${ip}`;
+
+  const limited = await enforceRateLimit(env, rlKey, origin);
+  if (limited) return limited;
+
   if (!isAuthorized(request, env)) {
+    await recordFailedAttempt(env, rlKey);
     return jsonResponse({ error: "Unauthorized" }, 401, origin);
   }
+  await resetFailedAttempts(env, rlKey);
+
   let body: { label?: string; expiresIn?: number } = {};
   try {
     body = (await request.json()) as { label?: string; expiresIn?: number };
@@ -129,7 +208,11 @@ async function handleCreatePassword(
     createdAt: now,
   };
 
-  await env.RESUME_KV.put(`pwd_${id}`, JSON.stringify(entry));
+  const hash = await sha256hex(password);
+  await Promise.all([
+    env.RESUME_KV.put(`pwd_${id}`, JSON.stringify(entry)),
+    env.RESUME_KV.put(`idx_${hash}`, `pwd_${id}`),
+  ]);
   return jsonResponse({ id, password, label, expires: entry.expires }, 201, origin);
 }
 
@@ -139,9 +222,18 @@ async function handleListPasswords(
   env: Env,
   origin: string | null
 ): Promise<Response> {
+  const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
+  const rlKey = `rl_admin_${ip}`;
+
+  const limited = await enforceRateLimit(env, rlKey, origin);
+  if (limited) return limited;
+
   if (!isAuthorized(request, env)) {
+    await recordFailedAttempt(env, rlKey);
     return jsonResponse({ error: "Unauthorized" }, 401, origin);
   }
+  await resetFailedAttempts(env, rlKey);
+
   const list = await env.RESUME_KV.list({ prefix: "pwd_" });
   const now = Date.now();
   const results = await Promise.all(
@@ -171,9 +263,18 @@ async function handleRevokePassword(
   env: Env,
   origin: string | null
 ): Promise<Response> {
+  const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
+  const rlKey = `rl_admin_${ip}`;
+
+  const limited = await enforceRateLimit(env, rlKey, origin);
+  if (limited) return limited;
+
   if (!isAuthorized(request, env)) {
+    await recordFailedAttempt(env, rlKey);
     return jsonResponse({ error: "Unauthorized" }, 401, origin);
   }
+  await resetFailedAttempts(env, rlKey);
+
   const key = `pwd_${id}`;
   const raw = await env.RESUME_KV.get(key);
   if (!raw) {
@@ -181,7 +282,11 @@ async function handleRevokePassword(
   }
   const entry: PasswordEntry = JSON.parse(raw);
   entry.active = false;
-  await env.RESUME_KV.put(key, JSON.stringify(entry));
+  const hash = await sha256hex(entry.password);
+  await Promise.all([
+    env.RESUME_KV.put(key, JSON.stringify(entry)),
+    env.RESUME_KV.delete(`idx_${hash}`),
+  ]);
   return jsonResponse({ ok: true, id }, 200, origin);
 }
 
@@ -191,6 +296,12 @@ async function handleVerify(
   env: Env,
   origin: string | null
 ): Promise<Response> {
+  const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
+  const rlKey = `rl_verify_${ip}`;
+
+  const limited = await enforceRateLimit(env, rlKey, origin);
+  if (limited) return limited;
+
   let body: { password?: string };
   try {
     body = (await request.json()) as { password?: string };
@@ -204,23 +315,89 @@ async function handleVerify(
   }
 
   const now = Date.now();
-  const list = await env.RESUME_KV.list({ prefix: "pwd_" });
 
-  for (const key of list.keys) {
-    const raw = await env.RESUME_KV.get(key.name);
-    if (!raw) continue;
-    const entry: PasswordEntry = JSON.parse(raw);
-    if (entry.password === password && entry.active && entry.expires > now) {
-      // Valid password — return resume data
-      const resumeRaw = await env.RESUME_KV.get("resume_data");
-      if (!resumeRaw) {
-        return jsonResponse({ error: "Resume data not found" }, 404, origin);
+  // O(1) hash-indexed lookup
+  const hash = await sha256hex(password);
+  const pwdKey = await env.RESUME_KV.get(`idx_${hash}`);
+
+  if (pwdKey) {
+    const raw = await env.RESUME_KV.get(pwdKey);
+    if (raw) {
+      const entry: PasswordEntry = JSON.parse(raw);
+      if (entry.active && entry.expires > now) {
+        await resetFailedAttempts(env, rlKey);
+        const resumeRaw = await env.RESUME_KV.get("resume_data");
+        if (!resumeRaw) {
+          return jsonResponse({ error: "Resume data not found" }, 404, origin);
+        }
+        return jsonResponse(JSON.parse(resumeRaw), 200, origin);
       }
-      return jsonResponse(JSON.parse(resumeRaw), 200, origin);
+    }
+  } else {
+    // Legacy fallback: no hash index found — scan all passwords in parallel
+    const list = await env.RESUME_KV.list({ prefix: "pwd_" });
+    const entries = await Promise.all(
+      list.keys.map(async (k) => {
+        const raw = await env.RESUME_KV.get(k.name);
+        return raw ? (JSON.parse(raw) as PasswordEntry) : null;
+      })
+    );
+    for (const entry of entries) {
+      if (entry && entry.password === password && entry.active && entry.expires > now) {
+        await resetFailedAttempts(env, rlKey);
+        const resumeRaw = await env.RESUME_KV.get("resume_data");
+        if (!resumeRaw) {
+          return jsonResponse({ error: "Resume data not found" }, 404, origin);
+        }
+        return jsonResponse(JSON.parse(resumeRaw), 200, origin);
+      }
     }
   }
 
+  await recordFailedAttempt(env, rlKey);
   return jsonResponse({ error: "密码无效或已过期" }, 403, origin);
+}
+
+/** DELETE /api/passwords — cleanup expired/revoked passwords (admin only) */
+async function handleCleanup(
+  request: Request,
+  env: Env,
+  origin: string | null
+): Promise<Response> {
+  const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
+  const rlKey = `rl_admin_${ip}`;
+
+  const limited = await enforceRateLimit(env, rlKey, origin);
+  if (limited) return limited;
+
+  if (!isAuthorized(request, env)) {
+    await recordFailedAttempt(env, rlKey);
+    return jsonResponse({ error: "Unauthorized" }, 401, origin);
+  }
+  await resetFailedAttempts(env, rlKey);
+
+  const list = await env.RESUME_KV.list({ prefix: "pwd_" });
+  const now = Date.now();
+
+  const results = await Promise.all(
+    list.keys.map(async (key) => {
+      const raw = await env.RESUME_KV.get(key.name);
+      if (!raw) return 0;
+      const entry: PasswordEntry = JSON.parse(raw);
+      if (!entry.active || entry.expires < now) {
+        const hash = await sha256hex(entry.password);
+        await Promise.all([
+          env.RESUME_KV.delete(key.name),
+          env.RESUME_KV.delete(`idx_${hash}`),
+        ]);
+        return 1;
+      }
+      return 0;
+    })
+  );
+  const deleted = results.reduce<number>((sum, n) => sum + n, 0);
+
+  return jsonResponse({ ok: true, deleted }, 200, origin);
 }
 
 // ---------------------------------------------------------------------------
@@ -233,7 +410,7 @@ function getAdminHTML(): string {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>简历管理后台</title>
+<title>管理后台</title>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
@@ -396,7 +573,10 @@ function getAdminHTML(): string {
     <div class="card">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
         <div class="card-title" style="margin-bottom:0">密码列表</div>
-        <button class="btn btn-ghost btn-sm" id="refresh-pwd-btn">🔄 刷新</button>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-ghost btn-sm" id="cleanup-pwd-btn">🧹 清理过期密码</button>
+          <button class="btn btn-ghost btn-sm" id="refresh-pwd-btn">🔄 刷新</button>
+        </div>
       </div>
       <div id="pwd-list"><div class="empty">加载中…</div></div>
     </div>
@@ -413,7 +593,7 @@ function getAdminHTML(): string {
   const STORAGE_KEY = 'admin_key';
 
   // ---- Helpers ----
-  function getKey() { return localStorage.getItem(STORAGE_KEY) || ''; }
+  function getKey() { return sessionStorage.getItem(STORAGE_KEY) || ''; }
 
   function authHeaders() {
     return { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + getKey() };
@@ -455,7 +635,7 @@ function getAdminHTML(): string {
   if (getKey()) {
     showToast('验证中…', 1500);
     verifyKey(getKey(), showApp, function (msg) {
-      localStorage.removeItem(STORAGE_KEY);
+      sessionStorage.removeItem(STORAGE_KEY);
       showLogin();
       showToast(msg || 'Admin Key 无效，请重新登录');
     });
@@ -467,7 +647,7 @@ function getAdminHTML(): string {
     var btn = this;
     btn.disabled = true;
     verifyKey(val, function () {
-      localStorage.setItem(STORAGE_KEY, val);
+      sessionStorage.setItem(STORAGE_KEY, val);
       btn.disabled = false;
       showApp();
     }, function (msg) {
@@ -481,7 +661,7 @@ function getAdminHTML(): string {
   });
 
   document.getElementById('logout-btn').addEventListener('click', function () {
-    localStorage.removeItem(STORAGE_KEY);
+    sessionStorage.removeItem(STORAGE_KEY);
     showLogin();
   });
 
@@ -572,6 +752,18 @@ function getAdminHTML(): string {
 
   document.getElementById('refresh-pwd-btn').addEventListener('click', loadPasswordList);
 
+  document.getElementById('cleanup-pwd-btn').addEventListener('click', function () {
+    if (!confirm('清理所有已过期或已吊销的密码？')) return;
+    fetch(BASE + '/api/passwords', { method: 'DELETE', headers: authHeaders() })
+      .then(function (r) { return r.json(); })
+      .then(function (data) {
+        if (data.error) { showToast('❌ ' + data.error); return; }
+        showToast('✅ 已清理 ' + data.deleted + ' 条记录');
+        loadPasswordList();
+      })
+      .catch(function () { showToast('❌ 请求失败'); });
+  });
+
   document.getElementById('create-pwd-btn').addEventListener('click', function () {
     var label = document.getElementById('pwd-label').value.trim();
     var expiresIn = parseInt(document.getElementById('pwd-expires').value, 10);
@@ -651,7 +843,7 @@ export default {
     }
 
     // Admin HTML page
-    if (pathname === "/admin" && request.method === "GET") {
+    if (pathname === "/admin-panel-x7k9" && request.method === "GET") {
       return new Response(getAdminHTML(), {
         status: 200,
         headers: { "Content-Type": "text/html; charset=utf-8" },
@@ -667,6 +859,7 @@ export default {
     if (pathname === "/api/passwords") {
       if (request.method === "POST") return handleCreatePassword(request, env, origin);
       if (request.method === "GET") return handleListPasswords(request, env, origin);
+      if (request.method === "DELETE") return handleCleanup(request, env, origin);
     }
 
     const revokeMatch = pathname.match(/^\/api\/passwords\/([^/]+)$/);
