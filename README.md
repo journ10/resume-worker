@@ -4,6 +4,8 @@
 
 将简历 JSON 数据存储在 Cloudflare KV 中（而非公开代码库），通过临时密码向指定查看者授权访问。任何人都可以 Fork 此仓库，配置自己的 Cloudflare 账号和 GitHub Secrets，即可搭建独立的简历服务。
 
+> ⚠️ **本仓库不接受外部 Pull Request。** 欢迎 Fork 后自由修改使用，如有问题请提 Issue。
+
 ## 架构
 
 ```
@@ -65,14 +67,14 @@ npx wrangler kv namespace create "RESUME_KV"
 
 | Secret 名称 | 说明 |
 |---|---|
-| `CLOUDFLARE_API_TOKEN` | Cloudflare API Token（需要 Workers 编辑权限） |
+| `CLOUDFLARE_API_TOKEN` | Cloudflare API Token���需要 Workers 编辑权限） |
 | `CLOUDFLARE_ACCOUNT_ID` | 你的 Cloudflare Account ID |
 | `KV_NAMESPACE_ID` | 第二步创建的 KV 命名空间 ID |
 | `ADMIN_KEY` | 管理密钥，自行设置一个强密码，例如 `sk_myKey2026!` |
 | `ALLOWED_ORIGIN` | 你的前端域名，例如 `https://yourusername.github.io` |
 
 > 获取 Cloudflare API Token：[Cloudflare Dashboard](https://dash.cloudflare.com/profile/api-tokens) → Create Token → 选择 "Edit Cloudflare Workers" 模板
->
+> 
 > 获取 Account ID：Cloudflare Dashboard 右侧边栏即可看到
 
 ### 第四步：触发部署
