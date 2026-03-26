@@ -444,15 +444,36 @@ function getAdminHTML(): string {
     document.getElementById('login-screen').style.display = 'flex';
   }
 
+  function verifyKey(key, onSuccess, onFail) {
+    fetch(BASE + '/api/passwords', {
+      headers: { 'Authorization': 'Bearer ' + key }
+    }).then(function (r) {
+      if (r.ok) { onSuccess(); } else { onFail(r.status === 401 ? 'Admin Key 无效' : '服务器错误，请稍后重试'); }
+    }).catch(function () { onFail('网络请求失败，请检查连接'); });
+  }
+
   if (getKey()) {
-    showApp();
+    showToast('验证中…', 1500);
+    verifyKey(getKey(), showApp, function (msg) {
+      localStorage.removeItem(STORAGE_KEY);
+      showLogin();
+      showToast(msg || 'Admin Key 无效，请重新登录');
+    });
   }
 
   document.getElementById('login-btn').addEventListener('click', function () {
     var val = document.getElementById('key-input').value.trim();
     if (!val) { showToast('请输入 Admin Key'); return; }
-    localStorage.setItem(STORAGE_KEY, val);
-    showApp();
+    var btn = this;
+    btn.disabled = true;
+    verifyKey(val, function () {
+      localStorage.setItem(STORAGE_KEY, val);
+      btn.disabled = false;
+      showApp();
+    }, function (msg) {
+      btn.disabled = false;
+      showToast(msg || 'Admin Key 无效');
+    });
   });
 
   document.getElementById('key-input').addEventListener('keydown', function (e) {
