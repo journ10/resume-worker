@@ -1,79 +1,107 @@
-# resume-worker
+# 简历访问控制服务
 
-Cloudflare Worker + KV 简历数据管理服务。
+> **Resume Access Control Worker** — Password-gated resume backend powered by Cloudflare Workers & KV
 
-将简历 JSON 数据存储在 Cloudflare KV 中（而非公开代码库），通过临时密码向指定查看者授权访问。支持创建多个独立密码、设置过期时间以及随时主动吊销。
+将简历 JSON 数据存储在 Cloudflare KV 中（而非公开代码库），通过临时密码向指定查看者授权访问。任何人都可以 Fork 此仓库，配置自己的 Cloudflare 账号和 GitHub Secrets，即可搭建独立的简历服务。
 
 ## 架构
 
 ```
-Cloudflare Worker + KV (免费)
-│
-│  KV 存储:
-│    resume_data        → JSON 简历数据
-│    pwd_<id>           → { password, expires, active, label, createdAt }
-│
-│  管理接口 (需要 Header: Authorization: Bearer <ADMIN_KEY>):
-│    PUT    /api/data           → 上传/更新简历数据
-│    GET    /api/data           → 查看当前简历数据
-│    POST   /api/passwords      → 创建密码
-│    GET    /api/passwords      → 列出所有密码及其状态
-│    DELETE /api/passwords/:id  → 吊销某个密码
-│
-│  公开接口:
-│    POST   /api/verify         → 验证密码，有效则返回简历数据
+用户浏览器
+    │
+    │  输入密码
+    ▼
+GitHub Pages（前端）
+    │  POST /api/verify
+    ▼
+Cloudflare Worker（本仓库）
+    │  读写
+    ▼
+Cloudflare KV（数据存储）
+    ├── resume_data          → 简历 JSON 数据
+    ├── pwd_hash_{sha256}    → 密码条目（哈希索引）
+    └── rl_*                 → 限流计数器
 ```
 
-## 部署步骤
+## 功能
 
-### 1. 安装 Wrangler CLI
+- 🔐 **密码访问控制** — 简历内容不公开，只有持有有效密码的人才能查看
+- 👥 **多密码支持** — 可为不同招聘方创建独立密码，互不干扰
+- ⏰ **过期与吊销** — 每个密码可设置有效期，面试结束后一键吊销
+- 🛡️ **管理后台** — 内置管理页面，支持上传简历数据、管理密码
+- 🚦 **请求限流** — 基于 IP 的频率限制，防止暴力破解（5 次失败锁定 15 分钟）
+- 🌐 **CORS 保护** — 仅允许配置的前端域名跨域访问
+
+## 环境要求
+
+- Node.js 20+
+- Cloudflare 账号（免费套餐即可）
+- GitHub 账号
+
+## 快速上手（Fork & 部署）
+
+### 第一步：Fork 本仓库
+
+点击右上角 **Fork**，将仓库复制到你的 GitHub 账号下。
+
+### 第二步：创建 Cloudflare KV 命名空间
 
 ```bash
-npm install -g wrangler
-wrangler login
+# 登录 Cloudflare
+npx wrangler login
+
+# 创建 KV 命名空间，记下输出中的 id
+npx wrangler kv namespace create "RESUME_KV"
 ```
 
-### 2. 创建 KV 命名空间
-
-在 [Cloudflare Dashboard](https://dash.cloudflare.com/) → **Workers & Pages** → **KV** 中创建一个命名空间（例如 `RESUME_KV`），记下生成的 **Namespace ID**。
-
-### 3. 填写 KV Namespace ID
-
-编辑 `wrangler.toml`，将 `YOUR_KV_NAMESPACE_ID` 替换为真实的 ID：
-
-```toml
-[[kv_namespaces]]
-binding = "RESUME_KV"
-id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+输出示例：
+```
+{ binding = "RESUME_KV", id = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" }
 ```
 
-### 4. 安装依赖
+### 第三步：配置 GitHub Secrets
 
-```bash
-npm install
+进入你 Fork 后的仓库 → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**，依次添加以下 Secrets：
+
+| Secret 名称 | 说明 |
+|---|---|
+| `CLOUDFLARE_API_TOKEN` | Cloudflare API Token（需要 Workers 编辑权限） |
+| `CLOUDFLARE_ACCOUNT_ID` | 你的 Cloudflare Account ID |
+| `KV_NAMESPACE_ID` | 第二步创建的 KV 命名空间 ID |
+| `ADMIN_KEY` | 管理密钥，自行设置一个强密码，例如 `sk_myKey2026!` |
+| `ALLOWED_ORIGIN` | 你的前端域名，例如 `https://yourusername.github.io` |
+
+> 获取 Cloudflare API Token：[Cloudflare Dashboard](https://dash.cloudflare.com/profile/api-tokens) → Create Token → 选择 "Edit Cloudflare Workers" 模板
+>
+> 获取 Account ID：Cloudflare Dashboard 右侧边栏即可看到
+
+### 第四步：触发部署
+
+推送任意提交到 `main` 分支，或在 **Actions** 页面手动触发 **Deploy to Cloudflare Workers** 工作流。
+
+### 第五步：记下 Worker URL
+
+部署成功后，在 Actions 日志中可以看到你的 Worker 地址：
+
+```
+https://resume-worker.<your-subdomain>.workers.dev
 ```
 
-### 5. 部署 Worker
+## 搭配前端使用
 
-```bash
-npm run deploy
-```
+本 Worker 设计与 [journ10/journ10.github.io](https://github.com/journ10/journ10.github.io) 前端配合使用。
 
-部署成功后会显示 Worker 的访问地址，格式类似 `https://resume-worker.<your-subdomain>.workers.dev`。
+Fork 前端仓库后，需要在前端仓库的 GitHub Secrets 中添加：
 
-### 6. 设置 ADMIN_KEY 密钥
-
-```bash
-wrangler secret put ADMIN_KEY
-# 输入一个足够复杂的密钥，例如: sk_mySecretKey2026!
-# 这个密钥只有你知道，所有管理接口都需要它
-```
+| Secret 名称 | 说明 |
+|---|---|
+| `WORKER_URL` | 你的 Worker 地址，例如 `https://resume-worker.xxx.workers.dev` |
 
 ---
 
 ## API 文档
 
-以下示例中 `WORKER_URL` 替换为你的 Worker 地址，`YOUR_ADMIN_KEY` 替换为你设置的 ADMIN_KEY。
+以下示例中 `WORKER_URL` 替换为你的 Worker 地址，`YOUR_ADMIN_KEY` 替换为你设置的 `ADMIN_KEY`。
 
 ### 上传 / 更新简历数据
 
@@ -81,12 +109,7 @@ wrangler secret put ADMIN_KEY
 curl -X PUT https://WORKER_URL/api/data \
   -H "Authorization: Bearer YOUR_ADMIN_KEY" \
   -H "Content-Type: application/json" \
-  -d '{
-    "name": "张三",
-    "email": "zhangsan@example.com",
-    "phone": "138-0000-0000",
-    "skills": ["TypeScript", "React", "Node.js"]
-  }'
+  -d @resume-data.json
 ```
 
 ### 查看当前简历数据
@@ -120,29 +143,11 @@ curl -X POST https://WORKER_URL/api/passwords \
 }
 ```
 
-将 `password` 字段的值（如 `A7xNmP3q`）发送给查看者即可。
-
 ### 列出所有密码
 
 ```bash
 curl https://WORKER_URL/api/passwords \
   -H "Authorization: Bearer YOUR_ADMIN_KEY"
-```
-
-返回示例：
-
-```json
-[
-  {
-    "id": "Ab3Kx9mNpQ2r",
-    "label": "给字节HR",
-    "password": "A7xNmP3q",
-    "expires": 1745678400000,
-    "active": true,
-    "createdAt": 1745072400000,
-    "isExpired": false
-  }
-]
 ```
 
 ### 吊销密码
@@ -152,7 +157,12 @@ curl -X DELETE https://WORKER_URL/api/passwords/Ab3Kx9mNpQ2r \
   -H "Authorization: Bearer YOUR_ADMIN_KEY"
 ```
 
-吊销后该密码立即失效，即使尚未过期。
+### 清理过期/吊销的密码
+
+```bash
+curl -X DELETE https://WORKER_URL/api/passwords \
+  -H "Authorization: Bearer YOUR_ADMIN_KEY"
+```
 
 ### 验证密码（公开接口，供前端调用）
 
@@ -163,29 +173,40 @@ curl -X POST https://WORKER_URL/api/verify \
 ```
 
 - 密码有效：HTTP 200，返回完整简历 JSON
-- 密码无效 / 已过期 / 已吊销：HTTP 403，返回 `{"error": "密码无效或已过期"}`
+- 密码无效 / 已过期 / 已吊销：HTTP 403
+- 请求过于频繁：HTTP 429
 
 ---
-
-## 使用流程
-
-1. **上传简历数据** — 通过 `PUT /api/data` 将简历 JSON 存入 KV
-2. **创建密码** — 通过 `POST /api/passwords` 为每位查看者生成独立密码（可附备注）
-3. **发送密码** — 将密码告知查看者，查看者通过前端输入密码后即可查看简历
-4. **按需吊销** — 面试结束后通过 `DELETE /api/passwords/:id` 立即撤销访问权限
-
-## 安全说明
-
-- **ADMIN_KEY** 通过 `wrangler secret put` 设置，存储在 Cloudflare Secrets 中，不会出现在代码库里
-- **CORS** 只允许 `https://journ10.github.io` 和 `localhost`（开发调试用）
-- **密码明文存储**在 KV 中（需要比对），但 KV 是私有的，只有 Worker 能访问
-- 所有响应均为 JSON 格式
-- Worker 不使用任何 npm 运行时依赖，仅使用 Web 标准 API 和 Cloudflare Workers API
 
 ## 本地开发
 
 ```bash
+# 安装依赖
+npm install
+
+# 启动本地开发服务器（Wrangler 会模拟 KV 存储）
 npm run dev
 ```
 
-Wrangler 会启动一个本地开发服务器，绑定到本地 KV 模拟存储。
+如需在本地测试 secrets，使用：
+
+```bash
+npx wrangler secret put ADMIN_KEY
+npx wrangler secret put ALLOWED_ORIGIN
+```
+
+---
+
+## 安全说明
+
+- **限流保护**：`/api/verify` 和管理接口均有基于 IP 的限流（5 次失败锁定 15 分钟）
+- **CORS 保护**：通过 `ALLOWED_ORIGIN` 环境变量控制允许的跨域来源，`localhost` 在开发模式下自动放行
+- **无硬编码凭证**：所有密钥通过 Cloudflare Secrets 或 GitHub Secrets 注入，不出现在代码库中
+- **密码哈希索引**：密码以 SHA-256 哈希为 KV key，O(1) 查找，避免全量扫描
+- **管理后台隐藏**：管理入口路径经过混淆，不直接暴露在 `/admin`
+
+---
+
+## License
+
+[MIT](./LICENSE) © 2026 journ10

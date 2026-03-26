@@ -1,6 +1,7 @@
 export interface Env {
   RESUME_KV: KVNamespace;
   ADMIN_KEY: string;
+  ALLOWED_ORIGIN: string; // e.g. "https://username.github.io"
 }
 
 interface PasswordEntry {
@@ -11,19 +12,24 @@ interface PasswordEntry {
   createdAt: number;
 }
 
-const ALLOWED_ORIGINS = [
-  "https://journ10.github.io",
-];
+function getAllowedOrigins(env: Env): string[] {
+  const origins: string[] = [];
+  if (env.ALLOWED_ORIGIN) {
+    origins.push(env.ALLOWED_ORIGIN);
+  }
+  return origins;
+}
 
-function isAllowedOrigin(origin: string | null): boolean {
+function isAllowedOrigin(origin: string | null, env: Env): boolean {
   if (!origin) return false;
-  if (ALLOWED_ORIGINS.includes(origin)) return true;
+  const allowed = getAllowedOrigins(env);
+  if (allowed.includes(origin)) return true;
   if (/^https?:\/\/localhost(:\d+)?$/.test(origin)) return true;
   return false;
 }
 
-function corsHeaders(origin: string | null): Record<string, string> {
-  const allowed = isAllowedOrigin(origin) ? origin! : ALLOWED_ORIGINS[0];
+function corsHeaders(origin: string | null, env: Env): Record<string, string> {
+  const allowed = isAllowedOrigin(origin, env) ? origin! : (env.ALLOWED_ORIGIN || "*");
   return {
     "Access-Control-Allow-Origin": allowed,
     "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
@@ -35,13 +41,14 @@ function corsHeaders(origin: string | null): Record<string, string> {
 function jsonResponse(
   body: unknown,
   status = 200,
-  origin: string | null = null
+  origin: string | null = null,
+  env?: Env
 ): Response {
   return new Response(JSON.stringify(body), {
     status,
     headers: {
       "Content-Type": "application/json",
-      ...corsHeaders(origin),
+      ...(env ? corsHeaders(origin, env) : {}),
     },
   });
 }
@@ -89,7 +96,7 @@ async function enforceRateLimit(
   if (raw) {
     const data: RateLimitData = JSON.parse(raw);
     if (data.count >= RATE_LIMIT_MAX) {
-      return jsonResponse({ error: "请求过于频繁，请稍后再试" }, 429, origin);
+      return jsonResponse({ error: "请求过于频繁，请稍后再试" }, 429, origin, env);
     }
   }
   return null;
@@ -131,7 +138,7 @@ async function handlePutData(
 
   if (!isAuthorized(request, env)) {
     await recordFailedAttempt(env, rlKey);
-    return jsonResponse({ error: "Unauthorized" }, 401, origin);
+    return jsonResponse({ error: "Unauthorized" }, 401, origin, env);
   }
   await resetFailedAttempts(env, rlKey);
 
@@ -139,10 +146,10 @@ async function handlePutData(
   try {
     body = await request.json();
   } catch {
-    return jsonResponse({ error: "Invalid JSON body" }, 400, origin);
+    return jsonResponse({ error: "Invalid JSON body" }, 400, origin, env);
   }
   await env.RESUME_KV.put("resume_data", JSON.stringify(body));
-  return jsonResponse({ ok: true }, 200, origin);
+  return jsonResponse({ ok: true }, 200, origin, env);
 }
 
 /** GET /api/data — retrieve resume data (admin only) */
@@ -159,15 +166,15 @@ async function handleGetData(
 
   if (!isAuthorized(request, env)) {
     await recordFailedAttempt(env, rlKey);
-    return jsonResponse({ error: "Unauthorized" }, 401, origin);
+    return jsonResponse({ error: "Unauthorized" }, 401, origin, env);
   }
   await resetFailedAttempts(env, rlKey);
 
   const raw = await env.RESUME_KV.get("resume_data");
   if (!raw) {
-    return jsonResponse({ error: "No resume data found" }, 404, origin);
+    return jsonResponse({ error: "No resume data found" }, 404, origin, env);
   }
-  return jsonResponse(JSON.parse(raw), 200, origin);
+  return jsonResponse(JSON.parse(raw), 200, origin, env);
 }
 
 /** POST /api/passwords — create a new password (admin only) */
@@ -184,7 +191,7 @@ async function handleCreatePassword(
 
   if (!isAuthorized(request, env)) {
     await recordFailedAttempt(env, rlKey);
-    return jsonResponse({ error: "Unauthorized" }, 401, origin);
+    return jsonResponse({ error: "Unauthorized" }, 401, origin, env);
   }
   await resetFailedAttempts(env, rlKey);
 
@@ -213,7 +220,7 @@ async function handleCreatePassword(
     env.RESUME_KV.put(`pwd_${id}`, JSON.stringify(entry)),
     env.RESUME_KV.put(`idx_${hash}`, `pwd_${id}`),
   ]);
-  return jsonResponse({ id, password, label, expires: entry.expires }, 201, origin);
+  return jsonResponse({ id, password, label, expires: entry.expires }, 201, origin, env);
 }
 
 /** GET /api/passwords — list all passwords (admin only) */
@@ -230,7 +237,7 @@ async function handleListPasswords(
 
   if (!isAuthorized(request, env)) {
     await recordFailedAttempt(env, rlKey);
-    return jsonResponse({ error: "Unauthorized" }, 401, origin);
+    return jsonResponse({ error: "Unauthorized" }, 401, origin, env);
   }
   await resetFailedAttempts(env, rlKey);
 
@@ -253,7 +260,7 @@ async function handleListPasswords(
       };
     })
   );
-  return jsonResponse(results.filter(Boolean), 200, origin);
+  return jsonResponse(results.filter(Boolean), 200, origin, env);
 }
 
 /** DELETE /api/passwords/:id — revoke a password (admin only) */
@@ -271,14 +278,14 @@ async function handleRevokePassword(
 
   if (!isAuthorized(request, env)) {
     await recordFailedAttempt(env, rlKey);
-    return jsonResponse({ error: "Unauthorized" }, 401, origin);
+    return jsonResponse({ error: "Unauthorized" }, 401, origin, env);
   }
   await resetFailedAttempts(env, rlKey);
 
   const key = `pwd_${id}`;
   const raw = await env.RESUME_KV.get(key);
   if (!raw) {
-    return jsonResponse({ error: "Password not found" }, 404, origin);
+    return jsonResponse({ error: "Password not found" }, 404, origin, env);
   }
   const entry: PasswordEntry = JSON.parse(raw);
   entry.active = false;
@@ -287,7 +294,7 @@ async function handleRevokePassword(
     env.RESUME_KV.put(key, JSON.stringify(entry)),
     env.RESUME_KV.delete(`idx_${hash}`),
   ]);
-  return jsonResponse({ ok: true, id }, 200, origin);
+  return jsonResponse({ ok: true, id }, 200, origin, env);
 }
 
 /** POST /api/verify — verify password and return resume data (public) */
@@ -306,12 +313,12 @@ async function handleVerify(
   try {
     body = (await request.json()) as { password?: string };
   } catch {
-    return jsonResponse({ error: "Invalid JSON body" }, 400, origin);
+    return jsonResponse({ error: "Invalid JSON body" }, 400, origin, env);
   }
 
   const { password } = body;
   if (!password) {
-    return jsonResponse({ error: "Missing password" }, 400, origin);
+    return jsonResponse({ error: "Missing password" }, 400, origin, env);
   }
 
   const now = Date.now();
@@ -328,9 +335,9 @@ async function handleVerify(
         await resetFailedAttempts(env, rlKey);
         const resumeRaw = await env.RESUME_KV.get("resume_data");
         if (!resumeRaw) {
-          return jsonResponse({ error: "Resume data not found" }, 404, origin);
+          return jsonResponse({ error: "Resume data not found" }, 404, origin, env);
         }
-        return jsonResponse(JSON.parse(resumeRaw), 200, origin);
+        return jsonResponse(JSON.parse(resumeRaw), 200, origin, env);
       }
     }
   } else {
@@ -347,15 +354,15 @@ async function handleVerify(
         await resetFailedAttempts(env, rlKey);
         const resumeRaw = await env.RESUME_KV.get("resume_data");
         if (!resumeRaw) {
-          return jsonResponse({ error: "Resume data not found" }, 404, origin);
+          return jsonResponse({ error: "Resume data not found" }, 404, origin, env);
         }
-        return jsonResponse(JSON.parse(resumeRaw), 200, origin);
+        return jsonResponse(JSON.parse(resumeRaw), 200, origin, env);
       }
     }
   }
 
   await recordFailedAttempt(env, rlKey);
-  return jsonResponse({ error: "密码无效或已过期" }, 403, origin);
+  return jsonResponse({ error: "密码无效或已过期" }, 403, origin, env);
 }
 
 /** DELETE /api/passwords — cleanup expired/revoked passwords (admin only) */
@@ -372,7 +379,7 @@ async function handleCleanup(
 
   if (!isAuthorized(request, env)) {
     await recordFailedAttempt(env, rlKey);
-    return jsonResponse({ error: "Unauthorized" }, 401, origin);
+    return jsonResponse({ error: "Unauthorized" }, 401, origin, env);
   }
   await resetFailedAttempts(env, rlKey);
 
@@ -397,7 +404,7 @@ async function handleCleanup(
   );
   const deleted = results.reduce<number>((sum, n) => sum + n, 0);
 
-  return jsonResponse({ ok: true, deleted }, 200, origin);
+  return jsonResponse({ ok: true, deleted }, 200, origin, env);
 }
 
 // ---------------------------------------------------------------------------
@@ -838,7 +845,7 @@ export default {
     if (request.method === "OPTIONS") {
       return new Response(null, {
         status: 204,
-        headers: corsHeaders(origin),
+        headers: corsHeaders(origin, env),
       });
     }
 
@@ -871,6 +878,6 @@ export default {
       return handleVerify(request, env, origin);
     }
 
-    return jsonResponse({ error: "Not found" }, 404, origin);
+    return jsonResponse({ error: "Not found" }, 404, origin, env);
   },
 } satisfies ExportedHandler<Env>;

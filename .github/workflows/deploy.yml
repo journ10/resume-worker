@@ -31,5 +31,7 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           secrets: |
             ADMIN_KEY
+            ALLOWED_ORIGIN
         env:
           ADMIN_KEY: ${{ secrets.ADMIN_KEY }}
+          ALLOWED_ORIGIN: ${{ secrets.ALLOWED_ORIGIN }}
